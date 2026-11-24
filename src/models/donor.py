@@ -1,6 +1,6 @@
-from datetime import datetime
 from typing import TYPE_CHECKING, List, Optional
 
+from pydantic import NaiveDatetime
 from sqlalchemy import Column
 from sqlmodel import Enum, Field, Relationship, SQLModel
 
@@ -12,17 +12,17 @@ if TYPE_CHECKING:
 
 
 class Donor(SQLModel, table=True):
-    age_years: int | None
-    age_months: int | None
+    age_years: int | None = None
+    age_months: int | None = None
     kdpi: int
     bmi: float
     blood_type: BloodType = Field(sa_column=Column(Enum(BloodType)))
     creatinine: float
-    init_creatinine: float | None
+    init_creatinine: float | None = None
     peak_creatinine: float
     height_cm: int
     weight_kg: float
-    clamp_dt: datetime
+    clamp_dt: NaiveDatetime
 
     phs_risk_factors: bool  # N or Y
     dcd: bool  # No or Yes

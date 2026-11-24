@@ -1,5 +1,6 @@
 from os import getenv
 
+from sqlalchemy.pool import StaticPool
 from sqlmodel import Session, SQLModel, create_engine
 
 
@@ -35,7 +36,16 @@ class DBManager:
         self.user = getenv('DB_USER')
         self.password = getenv('DB_PASSWORD')
         echo = getenv('DB_ECHO', 'false').lower() == 'true'
-        self._engine = create_engine(self.get_uri(), echo=echo)
+        uri = self.get_uri()
+        if uri == 'sqlite:///:memory:':
+            self._engine = create_engine(
+                uri,
+                echo=echo,
+                connect_args={'check_same_thread': False},
+                poolclass=StaticPool,
+            )
+        else:
+            self._engine = create_engine(uri, echo=echo)
 
     def get_uri(self) -> str:
         if self.db_uri:

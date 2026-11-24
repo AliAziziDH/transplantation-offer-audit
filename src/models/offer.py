@@ -1,6 +1,6 @@
-from datetime import datetime
 from typing import TYPE_CHECKING, Optional
 
+from pydantic import NaiveDatetime
 from sqlalchemy import Column, Enum
 from sqlmodel import Field, Relationship, SQLModel
 
@@ -17,12 +17,12 @@ class Offer(SQLModel, table=True):
 
     candidate_blood_type: BloodType = Field(sa_column=Column(Enum(BloodType)))
     candidate_age: int
-    candidate_epts_pct: float | None
+    candidate_epts_pct: float | None = None
     initial_response: Answer = Field(sa_column=Column(Enum(Answer)))
-    initial_response_dt: datetime
-    final_response_dt: datetime
-    notify_dt: datetime | None
-    match_submit_dt: datetime
+    initial_response_dt: NaiveDatetime
+    final_response_dt: NaiveDatetime
+    notify_dt: NaiveDatetime | None = None
+    match_submit_dt: NaiveDatetime
     response_post_clamp: bool
 
     fk_donor_id: str | None = Field(default=None, foreign_key='donor.donor_id')
@@ -32,8 +32,8 @@ class Offer(SQLModel, table=True):
         default=None, foreign_key='refusal_reason.code')
     fk_secondary_refusal_reason_code: int | None = Field(
         default=None, foreign_key='refusal_reason.code')
-    specify_primary_refusal_reason: str | None
-    specify_secondary_refusal_reason: str | None
+    specify_primary_refusal_reason: str | None = None
+    specify_secondary_refusal_reason: str | None = None
 
     match_id: int
     match_sequence: int

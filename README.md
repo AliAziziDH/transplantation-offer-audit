@@ -18,6 +18,8 @@ Offline auditing on the private UNOS/OPTN extracts (`ki_offers.csv`: $N = 59{,}9
 - **Base-rate illusion (`Offer Accepted`):** `99.40%` of offers are `No` (`99.37%` in the random test split). On 35 clean pre-decision features, `max_depth=5` achieves **99.35%** raw accuracy — **worse than the 99.37% trivial always-`No` baseline**, with `17.22%` recall on `Yes` (`0.00%` numeric-only).
 - **Theoretical identifiability ceiling (`Hospital with Offers` in `KI Outcome`):** 65 of 67 non-ID columns are invariant per donor (`1,003` unique feature rows out of `8,348`), capping Bayes-optimal accuracy at **12.01%**.
 
+![Primary Leakage Channels and Donor Overlap](assets/leakage_channels_summary.png)
+
 ```mermaid
 flowchart TD
     claim["Unverified Headline Claim: 99.3% Accuracy"] --> c1["Channel 1: Target Alias Entire Name (100% purity; depth=10 reaches 99.27%)"]

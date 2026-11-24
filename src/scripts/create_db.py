@@ -1,12 +1,10 @@
 """
-Clean ETL loader for kidney offer CSV files into PostgreSQL (via SQLModel) or SQLite.
+Clean ETL loader for kidney offer CSV files into PostgreSQL or SQLite via SQLModel.
 
 Supports:
 - Relative path resolution via PROJECT_ROOT (no hardcoded user/OS paths).
-- PostgreSQL mode via DBManager (when SQLModel + psycopg2 are installed and credentials are supplied).
-- SQLite mode via ``--sqlite`` (defaults to ``:memory:``): uses SQLModel when available,
-  or validates every row with the same ``read_*`` parser functions and loads built-in
-  ``sqlite3`` normalized tables when ``sqlmodel`` is not installed.
+- PostgreSQL mode via DBManager (when credentials are supplied or set in env).
+- SQLite mode via ``--sqlite`` (defaults to ``:memory:``) using SQLModel + DBManager.
 """
 
 from argparse import ArgumentParser
@@ -14,16 +12,19 @@ from datetime import datetime
 from os import environ
 from pathlib import Path
 import re
-import sqlite3
 import sys
 from typing import Any, Callable
 
 from pandas import DataFrame, Series, isna, read_csv
+from sqlalchemy import func
+from sqlmodel import Session, select
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from src.database.config import DBManager
+from src.models.donor import Donor
 from src.models.enums import (
     Answer,
     BirthSex,
@@ -35,21 +36,11 @@ from src.models.enums import (
     RefusalReasonType,
     Side,
 )
-
-try:
-    from sqlmodel import Session, SQLModel  # type: ignore
-
-    from src.database.config import DBManager
-    from src.models.donor import Donor
-    from src.models.hospital import Hospital
-    from src.models.kidney import Kidney
-    from src.models.offer import Offer
-    from src.models.recipient import Recipient
-    from src.models.refusal_reason import RefusalReason
-
-    HAS_SQLMODEL = True
-except ImportError:
-    HAS_SQLMODEL = False
+from src.models.hospital import Hospital
+from src.models.kidney import Kidney
+from src.models.offer import Offer
+from src.models.recipient import Recipient
+from src.models.refusal_reason import RefusalReason
 
 
 def resolve_default_csv(csv_arg: str | None) -> Path:
@@ -442,283 +433,17 @@ def feed_offer_data_sqlmodel(df: DataFrame) -> dict[str, int]:
         session.add_all(offers)
         session.commit()
 
-    return {
-        'donor': len(donors),
-        'hospital': len(hospitals),
-        'refusal_reason': len(refusal_reasons),
-        'kidney': len(kidneys),
-        'offer': len(offers),
-        'recipient': len(recipients),
-    }
-
-
-def feed_offer_data_sqlite3(df: DataFrame, db_target: str) -> dict[str, int]:
-    """Fallback SQLite loader using stdlib sqlite3 and the exact same row parsers."""
-    conn = sqlite3.connect(db_target)
-    cur = conn.cursor()
-    cur.executescript(
-        """
-        CREATE TABLE IF NOT EXISTS hospital (
-            code TEXT PRIMARY KEY,
-            name TEXT NOT NULL
-        );
-        CREATE TABLE IF NOT EXISTS refusal_reason (
-            code INTEGER PRIMARY KEY,
-            description TEXT NOT NULL
-        );
-        CREATE TABLE IF NOT EXISTS kidney (
-            kidney_id INTEGER PRIMARY KEY AUTOINCREMENT,
-            pump TEXT NOT NULL,
-            interstitial_fibrosis_description TEXT,
-            vascular_changes_description TEXT,
-            fk_recipient_id INTEGER
-        );
-        CREATE TABLE IF NOT EXISTS donor (
-            donor_id TEXT PRIMARY KEY,
-            age_years INTEGER,
-            age_months INTEGER,
-            kdpi INTEGER NOT NULL,
-            bmi REAL NOT NULL,
-            blood_type TEXT NOT NULL,
-            creatinine REAL NOT NULL,
-            init_creatinine REAL,
-            peak_creatinine REAL NOT NULL,
-            height_cm INTEGER NOT NULL,
-            weight_kg REAL NOT NULL,
-            clamp_dt TEXT NOT NULL,
-            phs_risk_factors INTEGER,
-            dcd INTEGER,
-            hist_iv_drug_use TEXT NOT NULL,
-            birth_sex TEXT NOT NULL,
-            cod TEXT NOT NULL,
-            hbsag INTEGER,
-            hbv_dna INTEGER,
-            hcv_nat INTEGER,
-            anti_hbc INTEGER,
-            anti_hcv INTEGER,
-            fk_left_kidney_id INTEGER,
-            fk_right_kidney_id INTEGER
-        );
-        CREATE TABLE IF NOT EXISTS offer (
-            offer_id INTEGER PRIMARY KEY AUTOINCREMENT,
-            candidate_blood_type TEXT NOT NULL,
-            candidate_age INTEGER NOT NULL,
-            candidate_epts_pct REAL,
-            initial_response TEXT NOT NULL,
-            initial_response_dt TEXT NOT NULL,
-            final_response_dt TEXT NOT NULL,
-            notify_dt TEXT,
-            match_submit_dt TEXT NOT NULL,
-            response_post_clamp INTEGER,
-            fk_donor_id TEXT,
-            fk_hospital_code TEXT,
-            distance INTEGER NOT NULL,
-            fk_primary_refusal_reason_code INTEGER,
-            fk_secondary_refusal_reason_code INTEGER,
-            specify_primary_refusal_reason TEXT,
-            specify_secondary_refusal_reason TEXT,
-            match_id INTEGER NOT NULL,
-            match_sequence INTEGER NOT NULL
-        );
-        CREATE TABLE IF NOT EXISTS recipient (
-            recipient_id INTEGER PRIMARY KEY AUTOINCREMENT,
-            cold_ischemic_time REAL NOT NULL,
-            creatinine_1y REAL,
-            creatinine_6m REAL,
-            pre_creatinine REAL NOT NULL,
-            serum_creatinine REAL NOT NULL,
-            end_epts REAL,
-            first_wk_dial TEXT NOT NULL,
-            graft_status TEXT NOT NULL,
-            graft_time INTEGER,
-            graft_fail_date TEXT,
-            length_of_stay INTEGER,
-            patient_status TEXT NOT NULL,
-            patient_time INTEGER,
-            patient_status_date TEXT,
-            rejection TEXT NOT NULL,
-            transplant_date TEXT NOT NULL,
-            fk_offer_id INTEGER
-        );
-        """
-    )
-
-    seen_donors: set[str] = set()
-    seen_hospitals: set[str] = set()
-    seen_refusals: set[int] = set()
-
-    for _, row in df.iterrows():
-        d = parse_donor_fields(row)
-        donor_id = d['donor_id']
-        if donor_id not in seen_donors:
-            cur.execute(
-                """
-                INSERT INTO donor (
-                    donor_id, age_years, age_months, kdpi, bmi, blood_type, creatinine,
-                    init_creatinine, peak_creatinine, height_cm, weight_kg, clamp_dt,
-                    phs_risk_factors, dcd, hist_iv_drug_use, birth_sex, cod,
-                    hbsag, hbv_dna, hcv_nat, anti_hbc, anti_hcv
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    donor_id,
-                    d['age_years'],
-                    d['age_months'],
-                    d['kdpi'],
-                    d['bmi'],
-                    d['blood_type'].name,
-                    d['creatinine'],
-                    d['init_creatinine'],
-                    d['peak_creatinine'],
-                    d['height_cm'],
-                    d['weight_kg'],
-                    d['clamp_dt'].isoformat() if d['clamp_dt'] else '',
-                    None if d['phs_risk_factors'] is None else int(d['phs_risk_factors']),
-                    None if d['dcd'] is None else int(d['dcd']),
-                    d['hist_iv_drug_use'].name,
-                    d['birth_sex'].name,
-                    d['cod'].name,
-                    None if d['hbsag'] is None else int(d['hbsag']),
-                    None if d['hbv_dna'] is None else int(d['hbv_dna']),
-                    None if d['hcv_nat'] is None else int(d['hcv_nat']),
-                    None if d['anti_hbc'] is None else int(d['anti_hbc']),
-                    None if d['anti_hcv'] is None else int(d['anti_hcv']),
-                ),
+        return {
+            name: int(session.exec(select(func.count()).select_from(model)).one())
+            for name, model in (
+                ('donor', Donor),
+                ('hospital', Hospital),
+                ('refusal_reason', RefusalReason),
+                ('kidney', Kidney),
+                ('offer', Offer),
+                ('recipient', Recipient),
             )
-            seen_donors.add(donor_id)
-
-        h_code = str(row['Hospital']).strip()
-        if h_code not in seen_hospitals:
-            cur.execute(
-                'INSERT INTO hospital (code, name) VALUES (?, ?)',
-                (h_code, str(row['Entire Name']).strip()),
-            )
-            seen_hospitals.add(h_code)
-
-        prim_code = None if isna(row['Primary Refusal Code']) else int(row['Primary Refusal Code'])
-        if prim_code is not None and prim_code not in seen_refusals:
-            cur.execute(
-                'INSERT INTO refusal_reason (code, description) VALUES (?, ?)',
-                (prim_code, str(row['Prime Descrip'])),
-            )
-            seen_refusals.add(prim_code)
-
-        sec_code = None if isna(row['Second Opo Refusal Id']) else int(row['Second Opo Refusal Id'])
-        if sec_code is not None and sec_code not in seen_refusals:
-            cur.execute(
-                'INSERT INTO refusal_reason (code, description) VALUES (?, ?)',
-                (sec_code, str(row['Second Descrip'])),
-            )
-            seen_refusals.add(sec_code)
-
-        o = parse_offer_fields(row)
-        cur.execute(
-            """
-            INSERT INTO offer (
-                candidate_blood_type, candidate_age, candidate_epts_pct, initial_response,
-                initial_response_dt, final_response_dt, notify_dt, match_submit_dt,
-                response_post_clamp, fk_donor_id, fk_hospital_code, distance,
-                fk_primary_refusal_reason_code, fk_secondary_refusal_reason_code,
-                specify_primary_refusal_reason, specify_secondary_refusal_reason,
-                match_id, match_sequence
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                o['candidate_blood_type'].name,
-                o['candidate_age'],
-                o['candidate_epts_pct'],
-                o['initial_response'].name,
-                o['initial_response_dt'].isoformat() if o['initial_response_dt'] else '',
-                o['final_response_dt'].isoformat() if o['final_response_dt'] else '',
-                o['notify_dt'].isoformat() if o['notify_dt'] else None,
-                o['match_submit_dt'].isoformat() if o['match_submit_dt'] else '',
-                None if o['response_post_clamp'] is None else int(o['response_post_clamp']),
-                donor_id,
-                h_code,
-                o['distance'],
-                prim_code,
-                sec_code,
-                o['specify_primary_refusal_reason'],
-                o['specify_secondary_refusal_reason'],
-                o['match_id'],
-                o['match_sequence'],
-            ),
-        )
-        offer_id = cur.lastrowid
-
-        left_acc, right_acc = read_accept_sequences(row)
-        for is_acc, side, fk_col in (
-            (left_acc == o['match_sequence'], Side.LEFT, 'fk_left_kidney_id'),
-            (right_acc == o['match_sequence'], Side.RIGHT, 'fk_right_kidney_id'),
-        ):
-            if not is_acc:
-                continue
-            k = parse_kidney_fields(row, side)
-            r = parse_recipient_fields(row, side)
-            kid_id = None
-            rec_id = None
-            if k is not None:
-                cur.execute(
-                    """
-                    INSERT INTO kidney (
-                        pump, interstitial_fibrosis_description, vascular_changes_description
-                    ) VALUES (?, ?, ?)
-                    """,
-                    (
-                        k['pump'].name,
-                        k['interstitial_fibrosis_description'].name
-                        if k['interstitial_fibrosis_description']
-                        else None,
-                        k['vascular_changes_description'].name
-                        if k['vascular_changes_description']
-                        else None,
-                    ),
-                )
-                kid_id = cur.lastrowid
-                cur.execute(f'UPDATE donor SET {fk_col} = ? WHERE donor_id = ?', (kid_id, donor_id))
-            if r is not None:
-                cur.execute(
-                    """
-                    INSERT INTO recipient (
-                        cold_ischemic_time, creatinine_1y, creatinine_6m, pre_creatinine,
-                        serum_creatinine, end_epts, first_wk_dial, graft_status, graft_time,
-                        graft_fail_date, length_of_stay, patient_status, patient_time,
-                        patient_status_date, rejection, transplant_date, fk_offer_id
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        r['cold_ischemic_time'],
-                        r['creatinine_1y'],
-                        r['creatinine_6m'],
-                        r['pre_creatinine'],
-                        r['serum_creatinine'],
-                        r['end_epts'],
-                        r['first_wk_dial'].name,
-                        r['graft_status'].name,
-                        r['graft_time'],
-                        r['graft_fail_date'].isoformat() if r['graft_fail_date'] else None,
-                        r['length_of_stay'],
-                        r['patient_status'].name,
-                        r['patient_time'],
-                        r['patient_status_date'].isoformat() if r['patient_status_date'] else None,
-                        r['rejection'].name,
-                        r['transplant_date'].isoformat() if r['transplant_date'] else '',
-                        offer_id,
-                    ),
-                )
-                rec_id = cur.lastrowid
-                if kid_id is not None:
-                    cur.execute(
-                        'UPDATE kidney SET fk_recipient_id = ? WHERE kidney_id = ?',
-                        (rec_id, kid_id),
-                    )
-
-    conn.commit()
-    counts = {}
-    for table in ('donor', 'hospital', 'refusal_reason', 'kidney', 'offer', 'recipient'):
-        counts[table] = int(cur.execute(f'SELECT COUNT(*) FROM {table}').fetchone()[0])
-    conn.close()
-    return counts
+        }
 
 
 def create_parser() -> ArgumentParser:
@@ -752,21 +477,13 @@ def main() -> None:
     print(f'Loaded CSV: {rel_csv} ({len(df)} rows, {df.shape[1]} columns)')
 
     if args.sqlite is not None:
-        if HAS_SQLMODEL:
-            environ['DB_DBMS'] = 'sqlite'
-            environ['DB_NAME'] = args.sqlite
-            DBManager.reset()
-            DBManager().create_db_and_tables()
-            counts = feed_offer_data_sqlmodel(df)
-            backend = f'sqlmodel+sqlite ({args.sqlite})'
-        else:
-            counts = feed_offer_data_sqlite3(df, args.sqlite)
-            backend = f'sqlite3-fallback ({args.sqlite})'
+        environ['DB_DBMS'] = 'sqlite'
+        environ['DB_NAME'] = args.sqlite
+        DBManager.reset()
+        DBManager().create_db_and_tables()
+        counts = feed_offer_data_sqlmodel(df)
+        backend = f'sqlmodel+sqlite ({args.sqlite})'
     else:
-        if not HAS_SQLMODEL:
-            raise RuntimeError(
-                'sqlmodel is required for PostgreSQL mode. Install requirements.txt or run with --sqlite :memory:.'
-            )
         if args.user:
             environ['DB_USER'] = args.user
         if args.password:
