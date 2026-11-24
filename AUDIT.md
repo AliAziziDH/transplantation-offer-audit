@@ -23,6 +23,16 @@ Inspection of the original script in the private baseline repository established
 - **Row-level random split across repeated donors:** Used `train_test_split(x, y, test_size=0.4, random_state=42)` without grouping by donor ID.
 - **No evaluation metrics computed:** Only printed `export_text(clf, ...)` without `predict`, `accuracy_score`, confusion matrix, balanced accuracy, or per-class F1.
 
+```mermaid
+flowchart LR
+    orig["Original Script: Transplantation_Model_01.py (test.xlsx, no encoding, no accuracy metric)"] --> split["Ungrouped 60/40 Split + Uncleaned Columns"]
+    split --> l1["Leak 1: Entire Name = Hospital (100% purity)"]
+    split --> l2["Leak 2: Primary Refusal Code & Final Response Dt (post-decision)"]
+    split --> l3["Leak 3: 90.08% Donor Overlap in ki_offers (218/242 donors)"]
+    split --> l4["Trap 4: Offer Accepted 99.37% Majority Class Baseline"]
+    split --> l5["Trap 5: KI Outcome 65/67 Cols Constant/Donor -> 12.01% Bayes Cap"]
+```
+
 ---
 
 ## 3. Private Data Audited Offline (Not Committed to Git)
@@ -40,6 +50,8 @@ Class imbalance is severe across both files: in `ki_offers.csv`, the tail classe
 ---
 
 ## 4. Catalogue of Data Leaks & Structural Artifacts
+
+![Single-Column Purity and Donor Overlap](assets/leakage_channels_summary.png)
 
 ### 4.1 Direct Target Alias (`Entire Name` ↔ `Hospital`)
 In `ki_offers.csv` ($N = 59{,}970$), `Entire Name` is the full hospital name corresponding 1-to-1 with `Hospital`:
@@ -72,6 +84,8 @@ In `KI Outcome Download_data 10.1.20-9.30.23.csv` ($N = 8{,}348$, 992 donors), *
 
 ## 5. Base-Rate Illusion (`Offer Accepted`: 99.35% vs. 99.37% Baseline)
 
+![Base-Rate Illusion on Offer Accepted](assets/base_rate_illusion.png)
+
 On `Offer Accepted` in `ki_offers.csv` ($N = 59{,}970$):
 - Full dataset: `No = 59,612` (**99.4030%**), `Yes = 358` (**0.5970%**).
 - Random 40% test split ($N_{\text{test}} = 23{,}988$, $N_{\text{train}} = 35{,}982$): `No = 23,837` (**99.3705%**), `Yes = 151` (**0.6295%**).
@@ -86,6 +100,8 @@ Reporting `99.35%` raw accuracy here is pure **base-rate illusion**.
 ---
 
 ## 6. Defensible Offline Benchmark Summary
+
+![Benchmark Accuracy Waterfall](assets/leakage_waterfall.png)
 
 All models below use `DecisionTreeClassifier(max_depth=5, random_state=42)` (unless marked as depth diagnostic) with `test_size=0.4, random_state=42`, and preprocessing fit strictly on the training fold.
 
